@@ -1,0 +1,82 @@
+[package]
+name = "melib"
+version = "0.8.13"
+authors = ["Manos Pitsidianakis <manos@pitsidianak.is>"]
+homepage = "https://meli-email.org"
+repository = "https://git.meli-email.org/meli/meli.git"
+description = "library for e-mail clients and other e-mail applications"
+keywords = ["mail", "mua", "maildir", "imap", "jmap"]
+categories = ["email", "parser-implementations"]
+license = "EUPL-1.2 OR GPL-3.0-or-later"
+edition = "2021"
+build = "build.rs"
+rust-version = "1.85.0"
+
+[lib]
+name = "melib"
+path = "src/lib.rs"
+
+[features]
+default = ["imap", "nntp", "maildir", "mbox-notify", "smtp"]
+
+debug-tracing = []
+gpgme = []
+http = ["isahc", "url/serde"]
+http-static = ["isahc", "isahc/static-curl"]
+imap = ["imap-codec", "imap-types", "tls"]
+imap-trace = ["imap"]
+jmap = ["http"]
+jmap-trace = ["jmap"]
+nntp = ["tls"]
+nntp-trace = ["nntp"]
+maildir = ["notify"]
+mbox-notify = ["notify"]
+notmuch = ["maildir"]
+smtp = ["tls"]
+smtp-trace = ["smtp"]
+sqlite3 = ["sqlite3-static"]
+sqlite3-static = ["rusqlite", "rusqlite/bundled-full"]
+tls = ["native-tls"]
+tls-static = ["tls", "native-tls/vendored"]
+
+[dependencies]
+async-fn-stream = { version = "0.3" }
+async-io = { version = "2" }
+base64 = { version = ">= 0.13, <= 0.22" }
+bitflags = { workspace = true }
+cfg-if = { version = "^1.0.0" }
+chrono = { version = "^0.4", default-features = false }
+data-encoding = { version = "2.9" }
+encoding_rs = { version = "^0.8" }
+flate2 = { workspace = true }
+futures = { workspace = true }
+imap-codec = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+imap-types = { version = "=2.0.0-alpha.6", features = ["ext_condstore_qresync", "ext_id"], optional = true }
+indexmap = { workspace = true }
+isahc = { version = "^1.7.2", optional = true, default-features = false, features = ["http2", "json", "text-decoding"] }
+libc = { workspace = true }
+libloading = { version = "0.8" }
+log = { version = "0.4", features = ["std"] }
+native-tls = { version = "0.2", default-features = false, optional = true }
+nix = { workspace = true, default-features = false, features = ["fs", "socket", "dir", "hostname"] }
+nom = { version = "7" }
+notify = { version = "8", optional = true }
+polling = { version = "3" }
+regex = { workspace = true }
+rusqlite = { version = "^0.37", default-features = false, features = ["array", "modern_sqlite"], optional = true }
+serde = { workspace = true, features = ["rc"] }
+serde_derive = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_path_to_error = { version = "0.1" }
+smallvec = { workspace = true }
+smol = { version = "2" }
+socket2 = { version = "0.6", features = [] }
+unicode-segmentation = { version = "1.2.1", default-features = false }
+url = { version = "2.5", optional = true }
+uuid = { version = "^1", features = ["serde", "v4", "v5"] }
+xdg = { version = "2.1.0" }
+
+[dev-dependencies]
+rusty-fork = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
