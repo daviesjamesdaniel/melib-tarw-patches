@@ -436,7 +436,13 @@ impl From<io::ErrorKind> for ErrorKind {
             io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::NotConnected => Self::Network(NetworkErrorKind::ConnectionFailed),
+            | io::ErrorKind::NotConnected
+            // A socket read hitting EOF mid-stream (peer closed without a
+            // clean TLS close_notify) is a dead connection just like a
+            // reset - without this, it fell through to `Platform` and
+            // callers checking `is_network()`/`is_disconnected()` (Tarw's
+            // own reconnect-and-retry) never saw it as one.
+            | io::ErrorKind::UnexpectedEof => Self::Network(NetworkErrorKind::ConnectionFailed),
             io::ErrorKind::TimedOut => Self::TimedOut,
             _ => Self::Platform,
         }
