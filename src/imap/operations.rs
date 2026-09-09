@@ -52,7 +52,13 @@ impl ImapOp {
 
     pub async fn fetch(self) -> Result<Vec<u8>> {
         let mut response = Vec::with_capacity(8 * 1024);
-        let mut use_body = false;
+        // Always peek: RFC822 has no peek variant at all (it always
+        // implicitly sets \Seen server-side per RFC 3501), and a bare
+        // BODY[] fetch with peek: false does the same. This silently
+        // marked messages as read any time the app fetched their body for
+        // a reason other than the user actually opening it (e.g. row
+        // prefetching). Read state should only ever change via the app's
+        // own explicit set_seen call.
         let (_uid, _flags, body) = loop {
             {
                 let mut conn = self.connection.lock().await?;
@@ -63,14 +69,10 @@ impl ImapOp {
                     self.uid,
                     vec![
                         MessageDataItemName::Flags,
-                        if use_body {
-                            MessageDataItemName::BodyExt {
-                                section: None,
-                                partial: None,
-                                peek: false,
-                            }
-                        } else {
-                            MessageDataItemName::Rfc822
+                        MessageDataItemName::BodyExt {
+                            section: None,
+                            partial: None,
+                            peek: true,
                         },
                     ],
                     true,
@@ -113,10 +115,6 @@ impl ImapOp {
                 ..
             } = fetch_response
             else {
-                if !use_body {
-                    use_body = true;
-                    continue;
-                }
                 return Err(Error::new("Invalid/unexpected response from server")
                     .set_summary(format!("Message with UID {} was not found.", self.uid))
                     .set_details(format!("Full response: {fetch_response:?}"))
