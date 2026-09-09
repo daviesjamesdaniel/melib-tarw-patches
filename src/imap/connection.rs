@@ -1180,7 +1180,8 @@ impl ImapConnection {
                         ImapResponse::Bye(ref response_code) => {
                             self.stream = Err(Error::new(format!(
                                 "Offline: received BYE: {response_code:?}"
-                            )));
+                            ))
+                            .set_kind(ErrorKind::Network(NetworkErrorKind::ConnectionFailed)));
                             ret.extend_from_slice(&response);
                             return r.into();
                         }
