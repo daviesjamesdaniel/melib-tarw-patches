@@ -93,8 +93,17 @@ impl ImapConnection {
             return Ok(None);
         };
         let mut response = Vec::with_capacity(1024);
+        // Fix: was force: true, unconditionally re-selecting the mailbox
+        // even when it's already the connection's current selection.
+        // resync() is called both right after ResyncCache's own
+        // init_mailbox() (which leaves the connection in EXAMINE state -
+        // force: false doesn't change anything there) and periodically from
+        // watch.rs's examine_updates() on an already-open connection with
+        // no preceding re-select, where force: false lets a real SELECT
+        // from a previous cycle be reused instead of re-selecting on every
+        // single poll.
         let select_response = self
-            .select_mailbox(mailbox_hash, &mut response, true)
+            .select_mailbox(mailbox_hash, &mut response, false)
             .await?;
         if select_response.uidvalidity != cached_uidvalidity {
             self.uid_store
@@ -359,8 +368,11 @@ impl ImapConnection {
         };
 
         // 1. check UIDVALIDITY. If fail, discard cache and rebuild
+        //
+        // Fix: was force: true - same redundant-reselect issue as
+        // resync_basic() above, see its comment for the full explanation.
         let select_response = self
-            .select_mailbox(mailbox_hash, &mut response, true)
+            .select_mailbox(mailbox_hash, &mut response, false)
             .await?;
         if select_response.uidvalidity != cached_uidvalidity {
             self.uid_store
