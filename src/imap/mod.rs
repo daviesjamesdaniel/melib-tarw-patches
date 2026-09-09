@@ -400,7 +400,42 @@ impl MailBackend for ImapType {
         Ok(Box::pin(try_fn_stream(|emitter| async move {
             let id = state.connection.lock().await?.id.clone();
             {
-                let f = &state.uid_store.mailboxes.lock().await[&mailbox_hash];
+                // A mailbox can disappear from this map between the caller
+                // resolving mailbox_hash and this stream actually running
+                // (e.g. a reconnect that rebuilds the mailbox list) -
+                // indexing with `[]` panics on exactly that race, and since
+                // fetch() is driven straight from a Tauri IPC command on
+                // the main thread, the panic can't unwind and aborts the
+                // whole process. Retry with backoff first, the same way
+                // idle() in watch.rs waits out INBOX not being in the map
+                // yet - this is a rebuild race, not a real "gone forever"
+                // case, so it should heal itself within a few hundred ms.
+                let mut retries = 0;
+                loop {
+                    let mailboxes_lck = state.uid_store.mailboxes.lock().await;
+                    if mailboxes_lck.contains_key(&mailbox_hash) {
+                        break;
+                    }
+                    if retries >= 10 {
+                        return Err(Error::new(format!(
+                            "mailbox {:?} no longer exists",
+                            mailbox_hash
+                        )));
+                    }
+                    drop(mailboxes_lck);
+                    smol::Timer::after(Duration::from_millis(
+                        retries * (4 * crate::utils::random::random_u8() as u64),
+                    ))
+                    .await;
+                    retries += 1;
+                }
+                let mailboxes_lck = state.uid_store.mailboxes.lock().await;
+                let Some(f) = mailboxes_lck.get(&mailbox_hash) else {
+                    return Err(Error::new(format!(
+                        "mailbox {:?} no longer exists",
+                        mailbox_hash
+                    )));
+                };
                 f.set_warm(true);
                 if let Ok(mut exists) = f.exists.lock() {
                     let total = exists.len();
