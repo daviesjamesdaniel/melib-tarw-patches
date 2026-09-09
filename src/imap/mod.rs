@@ -180,6 +180,7 @@ pub struct UIDStore {
     pub modseq: Arc<Mutex<HashMap<EnvelopeHash, ModSequence>>>,
     pub highestmodseqs: Arc<Mutex<HashMap<MailboxHash, std::result::Result<ModSequence, ()>>>>,
     pub mailboxes: Arc<FutureMutex<HashMap<MailboxHash, ImapMailbox>>>,
+    pub has_fetched_mailboxes: AtomicBool,
     pub is_online: Arc<Mutex<(SystemTime, Result<()>)>>,
     pub event_consumer: BackendEventConsumer,
     pub timeout: Option<Duration>,
@@ -212,6 +213,7 @@ impl UIDStore {
             msn_index: Default::default(),
             byte_cache: Default::default(),
             mailboxes: Arc::new(FutureMutex::new(Default::default())),
+            has_fetched_mailboxes: AtomicBool::new(false),
             collection: Default::default(),
             is_online: Arc::new(Mutex::new((
                 SystemTime::now(),
@@ -480,7 +482,7 @@ impl MailBackend for ImapType {
     }
 
     fn mailboxes(&mut self) -> ResultFuture<HashMap<MailboxHash, Mailbox>> {
-        let uid_store = self.uid_store.clone();
+        let mut uid_store = self.uid_store.clone();
         let connection = self.connection.clone();
         Ok(Box::pin(async move {
             {
@@ -492,9 +494,27 @@ impl MailBackend for ImapType {
                         .collect());
                 }
             }
+            if !uid_store.has_fetched_mailboxes.load(Ordering::SeqCst) {
+                let cached = uid_store.cached_mailboxes()?;
+                if !cached.is_empty() {
+                    *uid_store.mailboxes.lock().await = cached;
+                    uid_store
+                        .has_fetched_mailboxes
+                        .store(true, Ordering::SeqCst);
+                    let mailboxes = uid_store.mailboxes.lock().await;
+                    return Ok(mailboxes
+                        .iter()
+                        .map(|(h, f)| (*h, Box::new(Clone::clone(f)) as Mailbox))
+                        .collect());
+                }
+            }
             let new_mailboxes = Self::imap_mailboxes(&connection).await?;
+            uid_store
+                .has_fetched_mailboxes
+                .store(true, Ordering::SeqCst);
             let mut mailboxes = uid_store.mailboxes.lock().await;
             *mailboxes = new_mailboxes;
+            let mut to_persist = Vec::new();
             for m in mailboxes.values_mut() {
                 log::trace!(
                     "mailbox: {} is_subscribed: {}",
@@ -504,6 +524,15 @@ impl MailBackend for ImapType {
                 if (uid_store.is_subscribed)(m.path()) {
                     m.set_is_subscribed(true)?;
                 }
+                to_persist.push((
+                    m.hash(),
+                    m.path().to_string(),
+                    m.imap_path().to_string(),
+                    m.separator,
+                    m.no_select,
+                    m.special_usage(),
+                    m.is_subscribed(),
+                ));
             }
             /*
             let mut invalid_configs = vec![];
@@ -530,10 +559,26 @@ impl MailBackend for ImapType {
             for f in mailboxes.values_mut() {
                 f.children.retain(|c| keys.contains(c));
             }
-            Ok(mailboxes
+            let result = mailboxes
                 .iter()
                 .map(|(h, f)| (*h, Box::new(Clone::clone(f)) as Mailbox))
-                .collect())
+                .collect();
+            drop(mailboxes);
+            for (hash, path, imap_path, separator, no_select, special_use, is_subscribed) in
+                to_persist
+            {
+                uid_store.update_mailbox_metadata(
+                    hash,
+                    &path,
+                    &imap_path,
+                    separator,
+                    no_select,
+                    special_use,
+                    is_subscribed,
+                )?;
+            }
+            uid_store.prune_mailboxes(&keys)?;
+            Ok(result)
         }))
     }
 
