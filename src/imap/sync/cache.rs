@@ -26,6 +26,7 @@ use crate::{
     backends::MailboxHash,
     email::{Envelope, EnvelopeHash},
     error::*,
+    imap::{HashMap, HashSet, ImapMailbox},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -100,6 +101,22 @@ pub trait ImapCache: Send + std::fmt::Debug {
         mailbox_hash: MailboxHash,
         select_response: &SelectResponse,
     ) -> Result<()>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_mailbox_metadata(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        path: &str,
+        imap_path: &str,
+        separator: u8,
+        no_select: bool,
+        special_use: SpecialUsageMailbox,
+        is_subscribed: bool,
+    ) -> Result<()>;
+
+    fn cached_mailboxes(&mut self) -> Result<HashMap<MailboxHash, ImapMailbox>>;
+
+    fn prune_mailboxes(&mut self, keep: &HashSet<MailboxHash>) -> Result<()>;
 
     fn insert_envelopes(
         &mut self,
@@ -219,6 +236,61 @@ impl ImapCache for Arc<UIDStore> {
 
         if let Some(ref mut cache_handle) = *mutex {
             return cache_handle.update_mailbox(mailbox_hash, select_response);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_mailbox_metadata(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        path: &str,
+        imap_path: &str,
+        separator: u8,
+        no_select: bool,
+        special_use: SpecialUsageMailbox,
+        is_subscribed: bool,
+    ) -> Result<()> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.update_mailbox_metadata(
+                mailbox_hash,
+                path,
+                imap_path,
+                separator,
+                no_select,
+                special_use,
+                is_subscribed,
+            );
+        }
+        Ok(())
+    }
+
+    fn cached_mailboxes(&mut self) -> Result<HashMap<MailboxHash, ImapMailbox>> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(HashMap::default());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.cached_mailboxes();
+        }
+        Ok(HashMap::default())
+    }
+
+    fn prune_mailboxes(&mut self, keep: &HashSet<MailboxHash>) -> Result<()> {
+        if !self.keep_offline_cache.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut mutex = self.offline_cache.lock().unwrap();
+        self.init_cache(&mut mutex)?;
+        if let Some(ref mut cache_handle) = *mutex {
+            return cache_handle.prune_mailboxes(keep);
         }
         Ok(())
     }

@@ -23,16 +23,20 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use crate::{
-    backends::{EnvelopeHashBatch, FlagOp, MailboxHash, RefreshEvent, RefreshEventKind, TagHash},
+    backends::{
+        EnvelopeHashBatch, FlagOp, MailboxHash, RefreshEvent, RefreshEventKind,
+        SpecialUsageMailbox, TagHash,
+    },
     email::{Envelope, EnvelopeHash},
     error::{Error, ErrorKind, Result, ResultIntoError},
     imap::{
         sync::cache::{CachedEnvelope, CachedState, ImapCache, ImapCacheReset},
-        FetchResponse, ModSequence, SelectResponse, UIDStore, UID, UIDVALIDITY,
+        FetchResponse, HashMap, HashSet, ImapMailbox, ModSequence, SelectResponse, UIDStore, UID,
+        UIDVALIDITY,
     },
     utils::sqlite3::{
         self,
@@ -75,13 +79,19 @@ const DB_DESCRIPTION: DatabaseDescription = DatabaseDescription {
                 max_uid          INTEGER,
                 flags            BLOB NOT NULL,
                 highestmodseq    INTEGER,
+                path             TEXT NOT NULL,
+                imap_path        TEXT NOT NULL,
+                separator        INTEGER NOT NULL,
+                no_select        INTEGER NOT NULL,
+                special_use      BLOB,
+                is_subscribed    INTEGER,
                 PRIMARY KEY (mailbox_hash)
                );
     CREATE INDEX IF NOT EXISTS envelope_uid_idx ON envelopes(mailbox_hash, uid ASC);
     CREATE INDEX IF NOT EXISTS envelope_idx ON envelopes(hash);
     CREATE INDEX IF NOT EXISTS mailbox_idx ON mailbox(mailbox_hash);",
     ),
-    version: 5,
+    version: 6,
 };
 
 impl From<EnvelopeHash> for Value {
@@ -266,12 +276,12 @@ impl ImapCache for Sqlite3Cache {
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
-            "DELETE FROM mailbox WHERE mailbox_hash = ?1",
+            "DELETE FROM envelopes WHERE mailbox_hash = ?1",
             sqlite3::params![mailbox_hash],
         )
         .chain_err_summary(|| {
             format!(
-                "Could not clear cache of mailbox {} account {}",
+                "Could not clear cache of envelopes for mailbox {} account {}",
                 mailbox_hash, self.uid_store.account_name
             )
         })?;
@@ -279,8 +289,14 @@ impl ImapCache for Sqlite3Cache {
         let highestmodseq: Option<ModSequence> =
             select_response.highestmodseq.transpose().unwrap_or(None);
         tx.execute(
-            "INSERT OR IGNORE INTO mailbox (uidvalidity, flags, highestmodseq, mailbox_hash) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO mailbox \
+            (uidvalidity, flags, highestmodseq, mailbox_hash, path, imap_path, separator, \
+             no_select, special_use, is_subscribed) \
+             VALUES (?1, ?2, ?3, ?4, '', '', 0, 0, '', 0) \
+             ON CONFLICT(mailbox_hash) DO UPDATE SET \
+                uidvalidity = excluded.uidvalidity, \
+                flags = excluded.flags, \
+                highestmodseq = excluded.highestmodseq",
             sqlite3::params![
                 select_response.uidvalidity as Sqlite3UID,
                 select_response
@@ -353,6 +369,149 @@ impl ImapCache for Sqlite3Cache {
             uidvalidity: select_response.uidvalidity,
         };
         self.loaded_mailboxes.insert(mailbox_hash, val);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_mailbox_metadata(
+        &mut self,
+        mailbox_hash: MailboxHash,
+        path: &str,
+        imap_path: &str,
+        separator: u8,
+        no_select: bool,
+        special_use: SpecialUsageMailbox,
+        is_subscribed: bool,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO mailbox (mailbox_hash, path, imap_path, separator, no_select, special_use, is_subscribed, flags, uidvalidity)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
+            ON CONFLICT(mailbox_hash) DO UPDATE SET
+                path = excluded.path,
+                imap_path = excluded.imap_path,
+                separator = excluded.separator,
+                no_select = excluded.no_select,
+                special_use = excluded.special_use,
+                is_subscribed = excluded.is_subscribed,
+                uidvalidity = COALESCE(mailbox.uidvalidity, 0)",
+            sqlite3::params![
+                    mailbox_hash,
+                    path,
+                    imap_path,
+                    separator,
+                    no_select,
+                    special_use.to_string().as_bytes(),
+                    is_subscribed,
+                    b""
+            ],
+        )
+        .chain_err_summary(|| {
+            format!(
+                "Could not update the mailbox {} metadata of account {}",
+                mailbox_hash, self.uid_store.account_name
+            )
+        })?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn cached_mailboxes(&mut self) -> Result<HashMap<MailboxHash, ImapMailbox>> {
+        let tx = self.connection.transaction()?;
+        let mut statement = tx.prepare(
+            "SELECT mailbox_hash, path, imap_path, separator, no_select, special_use, is_subscribed
+                FROM mailbox",
+        )?;
+        let rows = statement.query_map(sqlite3::params![], |row| {
+            Ok((
+                row.get::<_, MailboxHash>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u8>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, bool>(6)?,
+            ))
+        })?;
+        let mut mailboxes: HashMap<MailboxHash, ImapMailbox> = HashMap::default();
+        let mut parent_links: Vec<(MailboxHash, MailboxHash)> = Vec::new();
+        for row in rows {
+            let (hash, path, imap_path, separator, no_select, special_use_bytes, is_subscribed) =
+                row?;
+            let usage = match to_str!(&special_use_bytes) {
+                "Inbox" => SpecialUsageMailbox::Inbox,
+                "Archive" => SpecialUsageMailbox::Archive,
+                "Drafts" => SpecialUsageMailbox::Drafts,
+                "Flagged" => SpecialUsageMailbox::Flagged,
+                "Junk" => SpecialUsageMailbox::Junk,
+                "Sent" => SpecialUsageMailbox::Sent,
+                "Trash" => SpecialUsageMailbox::Trash,
+                _ => SpecialUsageMailbox::Normal,
+            };
+            let (name, parent) =
+                if let Some(pos) = imap_path.as_bytes().iter().rposition(|&c| c == separator) {
+                    (
+                        imap_path[pos + 1..].to_string(),
+                        Some(MailboxHash::from_bytes(&imap_path.as_bytes()[..pos])),
+                    )
+                } else {
+                    (imap_path.clone(), None)
+                };
+            mailboxes.insert(
+                hash,
+                ImapMailbox {
+                    hash,
+                    imap_path,
+                    path,
+                    name,
+                    parent,
+                    separator,
+                    no_select,
+                    is_subscribed,
+                    usage: Arc::new(RwLock::new(usage)),
+                    children: vec![],
+                    ..ImapMailbox::default()
+                },
+            );
+            if let Some(p) = parent {
+                parent_links.push((hash, p));
+            }
+        }
+        for (hash, parent) in parent_links {
+            if let Some(parent_mailbox) = mailboxes.get_mut(&parent) {
+                parent_mailbox.children.push(hash);
+            }
+        }
+        Ok(mailboxes)
+    }
+
+    fn prune_mailboxes(&mut self, keep: &HashSet<MailboxHash>) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Vec<MailboxHash> = {
+            let mut statement = tx.prepare("SELECT mailbox_hash FROM mailbox")?;
+            let rows =
+                statement.query_map(sqlite3::params![], |row| row.get::<_, MailboxHash>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for hash in existing {
+            if !keep.contains(&hash) {
+                tx.execute(
+                    "DELETE FROM mailbox WHERE mailbox_hash = ?1",
+                    sqlite3::params![hash],
+                )
+                .chain_err_summary(|| {
+                    format!(
+                        "Could not prune stale mailbox {} of account {}",
+                        hash, self.uid_store.account_name
+                    )
+                })?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
