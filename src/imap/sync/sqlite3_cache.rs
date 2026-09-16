@@ -275,16 +275,6 @@ impl ImapCache for Sqlite3Cache {
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
-            "DELETE FROM envelopes WHERE mailbox_hash = ?1",
-            sqlite3::params![mailbox_hash],
-        )
-        .chain_err_summary(|| {
-            format!(
-                "Could not clear cache of envelopes for mailbox {} account {}",
-                mailbox_hash, self.uid_store.account_name
-            )
-        })?;
 
         let highestmodseq: Option<ModSequence> =
             select_response.highestmodseq.transpose().unwrap_or(None);
@@ -331,13 +321,26 @@ impl ImapCache for Sqlite3Cache {
         mailbox_hash: MailboxHash,
         select_response: &SelectResponse,
     ) -> Result<()> {
-        if self.mailbox_state(mailbox_hash)?.is_none() {
+        let Some(old_state) = self.mailbox_state(mailbox_hash)? else {
             return Err(Error::new("Mailbox is not in cache").set_kind(ErrorKind::NotFound));
-        }
-
+        };
+        
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if old_state.uidvalidity != 0 && old_state.uidvalidity != select_response.uidvalidity {
+            tx.execute(
+                "DELETE FROM envelopes WHERE mailbox_hash = ?1",
+                sqlite3::params![mailbox_hash],
+            )
+            .chain_err_summary(|| {
+                format!(
+                    "Could not clear cache of envelopes for mailbox {} account {}",
+                    mailbox_hash, self.uid_store.account_name
+                )
+            })?;
+        }
+
         let highestmodseq: Option<ModSequence> =
             select_response.highestmodseq.transpose().unwrap_or(None);
         tx.execute(
