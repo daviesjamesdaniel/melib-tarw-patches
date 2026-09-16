@@ -34,6 +34,11 @@ rusty_fork_test! {
     fn test_imap_fetch() {
         tests::run_imap_fetch();
     }
+
+    #[test]
+    fn test_imap_freshfetch_sparse_uids() {
+        tests::run_imap_freshfetch_sparse_uids();
+    }
 }
 
 pub mod server {
@@ -946,7 +951,8 @@ pub mod server {
                             == imap_types::search::SearchKey::SequenceSet(
                                 "1:*".try_into().unwrap(),
                             )
-                            .into() =>
+                            .into()
+                            || criteria == imap_types::search::SearchKey::All.into() =>
                         {
                             if !session_state.is_selected() {
                                 responses.push(Response::Status(
@@ -2006,6 +2012,120 @@ hello world 3.
             server_sender.unbounded_send(ServerEvent::Quit).unwrap();
             imap_server_handle.join().unwrap();
         };
+        std::thread::spawn(move || {
+            block_on(fut);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Test for FreshFetch blind UID range walk where it does unnecessary extra round trips
+    pub(crate) fn run_imap_freshfetch_sparse_uids() {
+        let new_mail = Mail::new(
+            br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Date: Thu, 01 Jan 1970 00:00:00 +0000
+Cc:
+Subject: RE: your e-mail
+Message-ID: <h2g7f.z0gy2pgaen5m@example.com>
+Content-Type: text/plain
+
+hello world.
+"#
+            .to_vec(),
+            None,
+        )
+        .unwrap();
+        let new_mail_2 = Mail::new(
+            br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Date: Thu, 01 Jan 1970 00:00:01 +0000
+Subject: RE: your e-mail 2
+Message-ID: <h2g7f.z0gy2pgaen6m@example.com>
+Content-Type: text/plain
+
+hello world 2.
+"#
+            .to_vec(),
+            None,
+        )
+        .unwrap();
+        let new_mail_3 = Mail::new(
+            br#"From: "some name" <some@example.com>
+To: "me" <myself@example.com>
+Cc:
+Date: Thu, 01 Jan 1970 00:00:02 +0000
+Subject: RE: your e-mail 3
+Message-ID: <h2g7f.z0gy2pgaen7m@example.com>
+Content-Type: text/plain
+
+hello world 3.
+"#
+            .to_vec(),
+            None,
+        )
+        .unwrap();
+
+        let ImapTest {
+            _logger,
+            _temp_dir,
+            server_state,
+            server_sender,
+            account_conf,
+            imap_server_handle,
+        } = setup(vec![
+            new_mail.clone(),
+            new_mail_2.clone(),
+            new_mail_3.clone(),
+        ]);
+
+        {
+            let mut state = server_state.lock().unwrap();
+            let old_envelopes = std::mem::take(&mut state.envelopes);
+            state.envelopes = old_envelopes
+                .into_values()
+                .enumerate()
+                .map(|(i, mail)| (50_000 + i * 7_000, mail))
+                .collect();
+            state.next_uid = 88_486;
+        }
+
+        let fut = async move {
+            let backend_event_consumer = BackendEventConsumer::new(Arc::new(|_, _| {}));
+            let mut imap =
+                ImapType::new(&account_conf, Default::default(), backend_event_consumer).unwrap();
+            imap.is_online().unwrap().await.unwrap();
+            let mailboxes = imap.mailboxes().unwrap().await.unwrap();
+            let inbox_hash = *mailboxes.keys().next().unwrap();
+
+            let mut fetch_fut = imap.fetch(inbox_hash).unwrap().into_future();
+            let mut envelopes: Vec<Envelope> = vec![];
+            let mut chunk_count = 0usize;
+            loop {
+                let (envs, rest) = fetch_fut.await;
+                let Some(envs) = envs else {
+                    break;
+                };
+                chunk_count += 1;
+                envelopes.extend(envs.unwrap());
+                fetch_fut = rest.into_future();
+            }
+
+            assert_eq!(
+                envelopes.len(),
+                3,
+                "all real messages should still be found"
+            );
+            assert!(
+                chunk_count <= 2,
+                "expected ~1-2 fetch round trips with SEARCH-first, got {chunk_count}"
+            );
+
+            server_sender.unbounded_send(ServerEvent::Quit).unwrap();
+            imap_server_handle.join().unwrap();
+        };
+
         std::thread::spawn(move || {
             block_on(fut);
         })
