@@ -290,7 +290,9 @@ impl FetchState {
                         conn.read_response(&mut search_response, RequiredResponses::SEARCH)
                             .await
                             .chain_err_summary(|| {
-                                format!("Could not parse SEARCH response for mailbox {mailbox_path}")
+                                format!(
+                                    "Could not parse SEARCH response for mailbox {mailbox_path}"
+                                )
                             })?;
                         let (_, mut uids) = protocol_parser::search_results(&search_response)?;
                         uids.sort_unstable_by(|a, b| b.cmp(a));

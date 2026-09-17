@@ -311,6 +311,9 @@ impl ImapConnection {
                             return Ok(None);
                         }
                     }
+                } else if n == 0 {
+                    //Mailbox is now genuinely empty
+                    vec![]
                 } else {
                     let sequence_set = if (previous_exists + 1) == n {
                         n.try_into()?
@@ -319,9 +322,9 @@ impl ImapConnection {
                     };
                     let (required_responses, attributes) = common_attributes();
                     try_fail!(
-                        mailbox_hash,
-                        self.send_command(CommandBody::fetch(sequence_set, attributes, false)?).await
-                        self.read_response(&mut response, required_responses).await
+                    mailbox_hash,
+                    self.send_command(CommandBody::fetch(sequence_set, attributes, false)?).await
+                    self.read_response(&mut response, required_responses).await
                     );
                     match super::protocol_parser::fetch_responses(&response) {
                         Ok((_, v, _)) => v,

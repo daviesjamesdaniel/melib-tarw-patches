@@ -324,7 +324,7 @@ impl ImapCache for Sqlite3Cache {
         let Some(old_state) = self.mailbox_state(mailbox_hash)? else {
             return Err(Error::new("Mailbox is not in cache").set_kind(ErrorKind::NotFound));
         };
-        
+
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
