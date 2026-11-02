@@ -217,7 +217,8 @@ impl ImapCache for Sqlite3Cache {
 
         let mut ret = stmt.query_map(sqlite3::params![mailbox_hash], |row| {
             Ok((
-                row.get(0)?,
+                row.get(0)
+                    .map(|i: Option<u32>| i.and_then(UIDVALIDITY::new))?,
                 row.get(1).map(|i: Option<u32>| i.and_then(UID::new))?,
                 row.get(2)?,
                 row.get(3)?,
@@ -225,13 +226,19 @@ impl ImapCache for Sqlite3Cache {
         })?;
         if let Some(v) = ret.next() {
             let (uidvalidity, mut lastseenuid, flags, highestmodseq): (
-                UIDVALIDITY,
+                Option<UIDVALIDITY>,
                 Option<UID>,
                 Vec<u8>,
                 Option<ModSequence>,
             ) = v?;
             drop(ret);
             drop(stmt);
+            // A row written by update_mailbox_metadata() for the cached
+            // mailbox list has no real UIDVALIDITY until the mailbox is first
+            // selected, so treat it as not yet in the cache.
+            let Some(uidvalidity) = uidvalidity else {
+                return Ok(None);
+            };
             let env_lastseenuid: Option<UID> = {
                 let mut stmt =
                     tx.prepare("SELECT MAX(uid) FROM envelopes WHERE mailbox_hash = ?1;")?;
