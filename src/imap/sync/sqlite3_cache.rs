@@ -475,7 +475,7 @@ impl ImapCache for Sqlite3Cache {
         for row in rows {
             let (hash, path, imap_path, separator, no_select, special_use_bytes, is_subscribed) =
                 row?;
-            let usage = match to_str!(&special_use_bytes) {
+            let usage = match String::from_utf8_lossy(&special_use_bytes).as_ref() {
                 "Inbox" => SpecialUsageMailbox::Inbox,
                 "Archive" => SpecialUsageMailbox::Archive,
                 "Drafts" => SpecialUsageMailbox::Drafts,
